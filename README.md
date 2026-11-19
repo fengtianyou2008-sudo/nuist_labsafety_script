@@ -1,2 +1,3 @@
 # nuist_labsafety_script
 帮你偷懒
+首先这是一个支持zerror题库+言蹊题库+AI复查的帮助你在nuist的实验室安全考试中偷懒的小工具
