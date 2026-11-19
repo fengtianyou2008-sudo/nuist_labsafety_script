@@ -13,8 +13,6 @@
   button:hover{background:#1d4fd8}
   .tip{margin-top:22px;padding:12px 14px;background:#fff7e6;border:1px solid #ffe0a3;border-radius:8px;font-size:13px;color:#7a4b00}
   .ok{margin-top:16px;color:#0a7a35;font-size:14px}
-  .row{display:flex;gap:12px}
-  .row>div{flex:1}
 </style>
 </head>
 <body>
@@ -24,35 +22,31 @@
   <input id="ze" placeholder="例如 http://127.0.0.1:3000/query">
 
   <label>言溪题库 token <span class="hint">（留空 = 不内置）</span></label>
-  <input id="yx" placeholder="例如 48a48d0f2cb94a5da6eb65799fc2da20">
+  <input id="yx" placeholder="32 位 token">
 
   <label>DeepSeek API Key <span class="hint">（可选，留空 = 不内置）</span></label>
   <input id="ai" placeholder="sk-...">
 
-  <div class="row">
-    <div>
-      <label>播放倍速</label>
-      <select id="rate">
-        <option value="4">4×（稳）</option>
-        <option value="8" selected>8×（推荐）</option>
-        <option value="16">16×（最快，可能被平台限速）</option>
-      </select>
-    </div>
-  </div>
+  <label>播放倍速</label>
+  <select id="rate">
+    <option value="4">4×（稳）</option>
+    <option value="8" selected>8×（推荐）</option>
+    <option value="16">16×（最快，可能被平台限速）</option>
+  </select>
 
   <button onclick="gen()">生成并下载脚本</button>
   <div id="msg" class="ok"></div>
 
   <div class="tip">
-    答题顺序：<b>ZError → 言溪 → DeepSeek → 本地题库</b>（哪层有结果就用哪层）。<br>
+    答题顺序：<b>ZError → 言溪 → DeepSeek</b>（哪层有结果就用哪层）。<br>
     注意：填进去的 token / key 会<b>明文写进脚本</b>，任何拿到脚本的人都能看到。只发给可信的人。
   </div>
 
   <script type="text/plain" id="tpl">// ==UserScript==
-// @name         南信大·实验室安全平台 自动连播+自动答题(zerror+言溪+AI)
-// @namespace    local.sakt.yanxi
+// @name         南信大·实验室安全平台 自动连播（生成版）
+// @namespace    local.sakt.generated
 // @version      3.0
-// @description  倍速播放、自动切节、考试/练习自动答题；优先查言溪（可粘贴整段配置），本地题库兜底
+// @description  倍速播放、自动切节、考试/练习自动答题；ZError → 言溪 → DeepSeek → 本地题库
 // @match        https://sakt.nuist.edu.cn/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
@@ -88,7 +82,7 @@
     mute: true,
     tickMs: 1500,
     answerQuiz: true,
-    bankUrl: 'http://127.0.0.1:8765/query',   // 本地题库（兜底，可选）
+    bankUrl: '__BANK_URL__',   // 本地题库（可选；留空=不启用）
     yanxiTimeout: 15000,
     zerrorTimeout: 20000,
     // ↓ 生成器写入的默认值（可在控制台改，或菜单重新设置）
@@ -108,7 +102,7 @@
       if (u && /^https?:\/\//.test(u)) return u;
     } catch (e) {}
     const d = CONFIG.defaultZerrorUrl || '';
-    return (d && d.indexOf('__ZERROR_URL__') < 0 && /^https?:\/\//.test(d)) ? d : '';
+    return (d && !d.startsWith('__') && /^https?:\/\//.test(d)) ? d : '';
   }
 
   function askZerror(title, optionsText, qtype) {
@@ -145,10 +139,17 @@
     } catch (e) { return CONFIG.defaultAiKey || ''; }
   }
 
+  function setAiKey(k) {
+    try {
+      if (k) localStorage.setItem(AI_KEY_STORE, k);
+      else localStorage.removeItem(AI_KEY_STORE);
+    } catch (e) {}
+  }
+
   function askDeepSeek(title, optionsText, qtype) {
     return new Promise((resolve) => {
       const key = getAiKey();
-      if (!key || key.indexOf('__AI_KEY__') >= 0) return resolve('');
+      if (!key || key.startsWith('__')) return resolve('');
       if (typeof GM_xmlhttpRequest !== 'function') return resolve('');
 
       const typeLabel = { single: '单选题', multiple: '多选题', judgement: '判断题', completion: '填空题' }[qtype] || '题目';
@@ -197,7 +198,7 @@
       if (t) return t;
     } catch (e) {}
     const d = CONFIG.defaultYanxiToken || '';
-    return (d && d.indexOf('__YANXI_TOKEN__') < 0) ? d : '';
+    return (d && !d.startsWith('__')) ? d : '';
   }
   function setYanxi(token) {
     try {
@@ -256,10 +257,13 @@
       p.token ? ('言溪已保存：' + p.token.slice(0, 4) + '**** @ ' + getYanxiUrl()) : '言溪配置已清除');
   }
 
+  // 返回 { answer, code, error }：区分「没收录」和「请求失败」
   function askYanxi(title, optionsText, qtype) {
     return new Promise((resolve) => {
       const token = getYanxi();
-      if (!token || typeof GM_xmlhttpRequest !== 'function') return resolve('');
+      if (!token || typeof GM_xmlhttpRequest !== 'function') {
+        return resolve({ answer: '', code: -1, error: '未配置 token' });
+      }
       GM_xmlhttpRequest({
         method: 'POST',
         url: getYanxiUrl(),
@@ -272,12 +276,16 @@
         onload: (res) => {
           try {
             const d = JSON.parse(res.responseText);
-            if (d && d.code === 1 && d.data && d.data.answer) return resolve(String(d.data.answer));
-            resolve('');
-          } catch (e) { resolve(''); }
+            if (d && d.code === 1 && d.data && d.data.answer) {
+              return resolve({ answer: String(d.data.answer), code: 1, error: '' });
+            }
+            resolve({ answer: '', code: (d && Number(d.code)) || 0, error: '' });
+          } catch (e) {
+            resolve({ answer: '', code: -1, error: '返回不是 JSON' });
+          }
         },
-        onerror: () => resolve(''),
-        ontimeout: () => resolve(''),
+        onerror: () => resolve({ answer: '', code: -1, error: '网络错误（可能被拦）' }),
+        ontimeout: () => resolve({ answer: '', code: -1, error: '超时' }),
       });
     });
   }
@@ -532,8 +540,15 @@
     return { form, title, qtype, opts, submit: form.querySelector('button.ant-btn-primary') };
   }
 
+  function bankEnabled() {
+    const u = CONFIG.bankUrl || '';
+    return u && !u.startsWith('__');
+  }
+
   async function askBank(title, optionsText, qtype) {
-    const res = await fetch(CONFIG.bankUrl, {
+    const url = CONFIG.bankUrl || '';
+    if (!url || url.indexOf('__BANK_URL__') >= 0) return '';   // 没启用就静默跳过
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -600,13 +615,15 @@
 
       // ② 言溪
       if (!letters.length && getYanxi()) {
-        const yx = await askYanxi(q.title, optionsText, q.qtype);
-        if (yx) {
-          letters = mapLetters(yx, q.opts, q.qtype);
+        const yr = await askYanxi(q.title, optionsText, q.qtype);
+        if (yr.answer) {
+          letters = mapLetters(yr.answer, q.opts, q.qtype);
           if (letters.length) from = '言溪';
-          else warn('言溪返回「' + yx + '」映射不到选项');
+          else warn('言溪返回「' + yr.answer + '」映射不到选项');
+        } else if (yr.error) {
+          warn('言溪请求失败：' + yr.error);
         } else {
-          warn('言溪没查到（token 错/额度用完）');
+          warn('言溪没收录这题（code=' + yr.code + '）');
         }
       }
 
@@ -619,8 +636,8 @@
         }
       }
 
-      // ③ 本地题库
-      if (!letters.length) {
+      // ④ 本地题库（只有启用时才连）
+      if (!letters.length && bankEnabled()) {
         try {
           const ans = await askBank(q.title, optionsText, q.qtype);
           if (ans) {
@@ -634,7 +651,7 @@
       }
 
       if (!letters.length) {
-        warn('言溪和本地题库都没给出答案，这题请手动选');
+        warn('所有题库都没给出答案（ZError/言溪/DeepSeek/本地），这题请手动选');
         return;
       }
 
@@ -800,6 +817,11 @@
     }
 
     if (!title || opts.length < 2) {
+      // 页面上根本没有考题（例如课程视频页）就别刷日志了
+      const hasQuestion = !!document.querySelector('.stem')
+        || /第\s*\d+\s*题/.test(document.body.innerText || '');
+      if (!hasQuestion) return null;
+
       const nAll = document.querySelectorAll('input[type=radio], input[type=checkbox]').length;
       const nLabel = labels.length;
       if (Date.now() - lastDiag > 8000) {
@@ -844,14 +866,7 @@
       const g = extractPracticeGlobal();
       if (g && g.opts.length) q = g;
     }
-    if (!q || !q.opts.length) {
-      const n = document.querySelectorAll('input[type=radio], input[type=checkbox]').length;
-      if (n >= 2 && Date.now() - lastDiag > 15000) {
-        lastDiag = Date.now();
-        warn('页面上有 ' + n + ' 个选项控件，但没解析出题目（识别失败）');
-      }
-      return;
-    }
+    if (!q || !q.opts.length) return;   // 诊断日志已在 extractPracticeGlobal 里，且只在有考题时才打
 
     const key = 'P|' + q.title;
     const last = handled.get(key) || 0;
@@ -876,9 +891,9 @@
       }
       // ② 言溪
       if (!letters.length && getYanxi()) {
-        const yx = await askYanxi(q.title, optionsText, q.qtype);
-        if (yx) {
-          letters = mapLetters(yx, q.opts, q.qtype);
+        const yr = await askYanxi(q.title, optionsText, q.qtype);
+        if (yr.answer) {
+          letters = mapLetters(yr.answer, q.opts, q.qtype);
           if (letters.length) from = '言溪';
         }
       }
@@ -890,8 +905,8 @@
           if (letters.length) from = 'DeepSeek';
         }
       }
-      // ③ 本地题库
-      if (!letters.length) {
+      // ④ 本地题库（只有启用时才连）
+      if (!letters.length && bankEnabled()) {
         try {
           const ans = await askBank(q.title, optionsText, q.qtype);
           if (ans) {
@@ -902,7 +917,7 @@
           warn('查本地题库失败：' + e.message);
         }
       }
-      if (!letters.length) { warn('言溪/DeepSeek/本地题库都没给出答案，跳过这题'); return; }
+      if (!letters.length) { warn('所有题库都没给出答案，跳过这题'); return; }
 
       for (const L of letters) {
         const hit = q.opts.find((o) => o.letter === L);
@@ -985,6 +1000,12 @@
     },
     getZerrorUrl,
     askZerror(title, opts, type) { return askZerror(title, opts, type); },
+    setAiKey(k) {
+      setAiKey(k);
+      log('DeepSeek Key：' + (getAiKey() && !getAiKey().startsWith('__') ? '已设置' : '已清除'));
+    },
+    getAiKey,
+    askDeepSeek(title, opts, type) { return askDeepSeek(title, opts, type); },
     config: CONFIG,
   };
 
@@ -1001,14 +1022,23 @@
         if (v === null) return;
         api.setZerror(v.trim());
       });
+      GM_registerMenuCommand('设置 DeepSeek Key', function () {
+        const cur = getAiKey();
+        const v = prompt('DeepSeek API Key（留空=清除）\n例如 sk-xxxxxxxx',
+          (cur && !cur.startsWith('__')) ? cur : '');
+        if (v === null) return;
+        api.setAiKey(v.trim());
+      });
     }
   } catch (e) {}
 
+  const aiOn = getAiKey() && !getAiKey().startsWith('__');
   log('已启动 v3.0（ZError+言溪版）：rate=' + CONFIG.rate + '，autoNext=' + CONFIG.autoNext + '，answerQuiz=' + CONFIG.answerQuiz);
-  log('ZError：' + (getZerrorUrl() || '未设置') + ' ｜ 言溪：' + (getYanxi() ? '已设置' : '未设置'));
+  log('ZError：' + (getZerrorUrl() || '未设置') + ' ｜ 言溪：' + (getYanxi() ? '已设置' : '未设置') +
+    ' ｜ DeepSeek：' + (aiOn ? '已设置' : '未设置'));
   log('章节识别：window.__sakt.chapters()');
 
-  if (CONFIG.answerQuiz && !getYanxi() && !getZerrorUrl() && !getAiKey()) {
+  if (CONFIG.answerQuiz && !getYanxi() && !getZerrorUrl() && !aiOn) {
     setTimeout(() => {
       warn('ZError / 言溪 / DeepSeek 都没配置，答题只能走本地题库');
     }, 1200);
@@ -1061,7 +1091,7 @@
       document.getElementById('msg').textContent = '已生成：' +
         (ze ? 'ZError=' + ze + '、' : 'ZError 未启用、') +
         (yx ? '言溪已内置、' : '言溪未内置、') +
-        (ai ? 'DeepSeek key 已内置、' : 'DeepSeek 未内置、') +
+        (ai ? 'DeepSeek 已内置、' : 'DeepSeek 未内置、') +
         '倍速 ' + rate + '×';
     }
   </script>
